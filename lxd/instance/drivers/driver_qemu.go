@@ -4670,8 +4670,8 @@ func (d *qemu) addGPUDevConfig(cfg *[]cfgSection, bus *qemuBus, gpuConfig []devi
 }
 
 func (d *qemu) addUSBDeviceConfig(usbDev deviceConfig.USBDeviceItem) (monitorHook, error) {
-	device := map[string]string{
-		"id":     qemuDeviceIDPrefix + usbDev.DeviceName,
+	device := map[string]any{
+		"id":     fmt.Sprintf("%s%s", qemuDeviceIDPrefix, usbDev.DeviceName),
 		"driver": "usb-host",
 		"bus":    "qemu_usb.0",
 	}
@@ -4687,13 +4687,13 @@ func (d *qemu) addUSBDeviceConfig(usbDev deviceConfig.USBDeviceItem) (monitorHoo
 
 		defer func() { _ = f.Close() }()
 
-		info, err := m.SendFileWithFDSet(device["id"], f, false)
+		info, err := m.SendFileWithFDSet(device["id"].(string), f, false)
 		if err != nil {
 			return fmt.Errorf("Failed to send file descriptor: %w", err)
 		}
 
 		revert.Add(func() {
-			_ = m.RemoveFDFromFDSet(device["id"])
+			_ = m.RemoveFDFromFDSet(device["id"].(string))
 		})
 
 		device["hostdevice"] = fmt.Sprintf("/dev/fdset/%d", info.ID)
@@ -9079,7 +9079,7 @@ func (d *qemu) setCPUs(count int) error {
 
 			devID := fmt.Sprintf("cpu%d%d%d", cpu.Props.SocketID, cpu.Props.CoreID, cpu.Props.ThreadID)
 
-			dev := map[string]string{
+			dev := map[string]any{
 				"id":      devID,
 				"driver":  cpu.Type,
 				"core-id": fmt.Sprint(cpu.Props.CoreID),
@@ -9087,8 +9087,8 @@ func (d *qemu) setCPUs(count int) error {
 
 			// No such thing as sockets and threads on s390x.
 			if d.architecture != osarch.ARCH_64BIT_S390_BIG_ENDIAN {
-				dev["socket-id"] = fmt.Sprint(cpu.Props.SocketID)
-				dev["thread-id"] = fmt.Sprint(cpu.Props.ThreadID)
+				dev["socket-id"] = cpu.Props.SocketID
+				dev["thread-id"] = cpu.Props.ThreadID
 			}
 
 			err := monitor.AddDevice(dev)
