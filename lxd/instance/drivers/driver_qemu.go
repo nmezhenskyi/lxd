@@ -4538,7 +4538,12 @@ func (d *qemu) addNetDevConfig(busName string, qemuDev map[string]any, bootIndex
 				qemuDev["driver"] = "virtio-net-ccw"
 			}
 
-			qemuDev["netdev"] = qemuNetDev["id"].(string)
+			qemuNetDevID, ok := qemuNetDev["id"].(string)
+			if !ok {
+				return fmt.Errorf("Failed getting QEMU netdev id")
+			}
+
+			qemuDev["netdev"] = qemuNetDevID
 			qemuDev["page-per-vq"] = true
 			qemuDev["iommu_platform"] = true
 			qemuDev["disable-legacy"] = true
