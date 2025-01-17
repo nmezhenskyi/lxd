@@ -3018,3 +3018,19 @@ Adds a `recursion=2` mode to `GET /1.0/operations`, enabling retrieval of parent
 
 Starting with this extension, if the {config:option}`server-miscellaneous:network.ovn.northbound_connection` server configuration is not specified, LXD dynamically determines the OVN Northbound database connection string based on the environment. 
 If the MicroOVN snap is used, LXD reads the configuration from the MicroOVN `ovn.env` file. Otherwise, it defaults to using the `unix:/var/run/ovn/ovnnb_db.sock` socket.
+
+(extension-cluster-links)=
+## `cluster_links`
+
+This introduces the cluster links API and identity type.
+
+This includes the following new endpoints (see {ref}`rest-api` for details):
+
+* [`GET /1.0/cluster/links/<name>`](swagger:/cluster-links/cluster_link_get)
+* [`GET /1.0/cluster/links`](swagger:/cluster-links/cluster_links_get)
+* [`GET /1.0/cluster/links/<name>/state`](swagger:/cluster-links/cluster_link_state_get)
+* [`PUT /1.0/cluster/links/<name>`](swagger:/cluster-links/cluster_link_put)
+* [`PATCH /1.0/cluster/links/<name>`](swagger:/cluster-links/cluster_link_patch)
+* [`POST /1.0/cluster/links`](swagger:/cluster-links/cluster_links_post)
+* [`POST /1.0/cluster/links/<name>`](swagger:/cluster-links/cluster_link_post)
+* [`DELETE /1.0/cluster/links/<name>`](swagger:/cluster-links/cluster_link_delete)
