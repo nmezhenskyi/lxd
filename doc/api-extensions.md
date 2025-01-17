@@ -3033,3 +3033,22 @@ This is primarily useful when combined with the `initial.` `disk` device configu
 Storage pool and network endpoints that were previously synchronous now return background operations. This affects create, update, delete, and rename actions on storage pools, networks, network ACLs, network zones, network zone records, network forwards, network load balancers, network peers, and storage buckets (including bucket keys).
 
 Clients should check for this extension and handle the asynchronous response by waiting on the returned operation. Operation metadata may include additional data, such as storage bucket admin credentials on bucket creation.
+
+(extension-cluster-links)=
+## `cluster_links`
+
+Cluster links enable secure, authenticated communication between separate LXD clusters using mutual TLS certificates.
+See {ref}`exp-cluster-links` for more information.
+
+This introduces the cluster links API and identity type.
+
+This includes the following new endpoints (see {ref}`rest-api` for details):
+
+* [`GET /1.0/cluster/links/<name>`](swagger:/cluster-links/cluster_link_get)
+* [`GET /1.0/cluster/links`](swagger:/cluster-links/cluster_links_get)
+* [`GET /1.0/cluster/links/<name>/state`](swagger:/cluster-links/cluster_link_state_get)
+* [`PUT /1.0/cluster/links/<name>`](swagger:/cluster-links/cluster_link_put)
+* [`PATCH /1.0/cluster/links/<name>`](swagger:/cluster-links/cluster_link_patch)
+* [`POST /1.0/cluster/links`](swagger:/cluster-links/cluster_links_post)
+* [`POST /1.0/cluster/links/<name>`](swagger:/cluster-links/cluster_link_post)
+* [`DELETE /1.0/cluster/links/<name>`](swagger:/cluster-links/cluster_link_delete)
