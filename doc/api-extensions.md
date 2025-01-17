@@ -3026,3 +3026,19 @@ A {config:option}`storage-zfs-volume-conf:zfs.promote` configuration key was int
 It's a Boolean that defaults to `false` and that when set to `true` instructs LXD to ZFS promote the volume being created (or re-created) from a clone.
 
 This is primarily useful when combined with the `initial.` `disk` device configuration options, as it allows controlling ZFS promotion when creating instances from other instances.
+
+(extension-cluster-links)=
+## `cluster_links`
+
+This introduces the cluster links API and identity type.
+
+This includes the following new endpoints (see {ref}`rest-api` for details):
+
+* [`GET /1.0/cluster/links/<name>`](swagger:/cluster-links/cluster_link_get)
+* [`GET /1.0/cluster/links`](swagger:/cluster-links/cluster_links_get)
+* [`GET /1.0/cluster/links/<name>/state`](swagger:/cluster-links/cluster_link_state_get)
+* [`PUT /1.0/cluster/links/<name>`](swagger:/cluster-links/cluster_link_put)
+* [`PATCH /1.0/cluster/links/<name>`](swagger:/cluster-links/cluster_link_patch)
+* [`POST /1.0/cluster/links`](swagger:/cluster-links/cluster_links_post)
+* [`POST /1.0/cluster/links/<name>`](swagger:/cluster-links/cluster_link_post)
+* [`DELETE /1.0/cluster/links/<name>`](swagger:/cluster-links/cluster_link_delete)
