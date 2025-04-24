@@ -3,6 +3,8 @@ package cluster
 import (
 	"context"
 	"crypto/x509"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/url"
 	"sync"
@@ -10,8 +12,15 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	lxd "github.com/canonical/lxd/client"
+	"github.com/canonical/lxd/lxd/db"
+	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
+	"github.com/canonical/lxd/lxd/state"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
+	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/logger"
+	"github.com/canonical/lxd/shared/version"
 )
 
 // CheckClusterLinkCertificate checks the cluster certificate at each address and ensures every reachable address matches the provided fingerprint.
@@ -108,4 +117,80 @@ func CheckClusterLinkCertificate(ctx context.Context, addresses []string, finger
 	}
 
 	return firstResult.cert, firstResult.address, nil
+}
+
+// GetClusterLinkConnectionArgs is a convenience function around [lxd.ConnectLXD] that configures the client with the correct parameters for cluster-to-cluster communication.
+// It attempts to connect to all addresses and returns the first successful client.
+func GetClusterLinkConnectionArgs(ctx context.Context, s *state.State, clusterLink api.ClusterLink) (*lxd.ConnectionArgs, error) {
+	clusterCert, err := util.LoadClusterCert(s.OS.VarDir)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the cluster link identity to retrieve the stored certificate.
+	var targetCert *x509.Certificate
+	err = s.DB.Cluster.Transaction(ctx, func(ctx context.Context, tx *db.ClusterTx) error {
+		dbLink, err := dbCluster.GetClusterLink(ctx, tx.Tx(), clusterLink.Name)
+		if err != nil {
+			return fmt.Errorf("Failed fetching cluster link: %w", err)
+		}
+
+		identity, err := dbCluster.GetIdentityByID(ctx, tx.Tx(), dbLink.IdentityID)
+		if err != nil {
+			return fmt.Errorf("Failed fetching cluster link identity: %w", err)
+		}
+
+		targetCert, err = identity.X509()
+		if err != nil {
+			return fmt.Errorf("Failed extracting certificate from cluster link identity: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	targetCertStr := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: targetCert.Raw}))
+
+	return &lxd.ConnectionArgs{
+		TLSClientCert: string(clusterCert.PublicKey()),
+		TLSClientKey:  string(clusterCert.PrivateKey()),
+		TLSServerCert: targetCertStr,
+		UserAgent:     version.UserAgent,
+	}, nil
+}
+
+// ConnectClusterLinkAddress connects to a specific cluster link address using the stored cluster link identity certificate for TLS verification.
+func ConnectClusterLinkAddress(ctx context.Context, s *state.State, clusterLink api.ClusterLink, address string) (lxd.InstanceServer, error) {
+	args, err := GetClusterLinkConnectionArgs(ctx, s, clusterLink)
+	if err != nil {
+		return nil, err
+	}
+
+	return lxd.ConnectLXD("https://"+address, args)
+}
+
+// ConnectClusterLink is a convenience function around [lxd.ConnectLXD] that configures the client with the correct parameters for cluster-to-cluster communication.
+// It attempts to connect to all addresses and returns the first successful client.
+func ConnectClusterLink(ctx context.Context, s *state.State, clusterLink api.ClusterLink) (lxd.InstanceServer, error) {
+	args, err := GetClusterLinkConnectionArgs(ctx, s, clusterLink)
+	if err != nil {
+		return nil, err
+	}
+
+	addresses := shared.SplitNTrimSpace(clusterLink.Config["volatile.addresses"], ",", -1, false)
+	for _, address := range addresses {
+		// Connect to cluster link.
+		client, err := lxd.ConnectLXD("https://"+address, args)
+		if err != nil {
+			logger.Warn("Failed connecting to cluster link address", logger.Ctx{"address": address, "err": err})
+			continue
+		}
+
+		return client, nil
+	}
+
+	logger.Error("Failed connecting to any cluster link address", logger.Ctx{"clusterLink": clusterLink.Name})
+	return nil, errors.New("Failed connecting to any cluster link address")
 }
