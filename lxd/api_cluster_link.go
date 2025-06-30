@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
@@ -55,6 +56,13 @@ var clusterLinkCmd = APIEndpoint{
 	Patch:  APIEndpointAction{Handler: clusterLinkPatch, AccessHandler: allowPermission(entity.TypeClusterLink, auth.EntitlementCanEdit, "name")},
 	Put:    APIEndpointAction{Handler: clusterLinkPut, AccessHandler: allowPermission(entity.TypeClusterLink, auth.EntitlementCanEdit, "name")},
 	Delete: APIEndpointAction{Handler: clusterLinkDelete, AccessHandler: allowPermission(entity.TypeClusterLink, auth.EntitlementCanDelete, "name")},
+}
+
+var clusterLinkStateCmd = APIEndpoint{
+	Path:        "cluster/links/{name}/state",
+	MetricsType: entity.TypeClusterLink,
+
+	Get: APIEndpointAction{Handler: clusterLinkStateGet, AccessHandler: allowPermission(entity.TypeClusterLink, auth.EntitlementCanView, "name")},
 }
 
 // swagger:operation GET /1.0/cluster/links cluster-links cluster_links_get
@@ -1295,4 +1303,151 @@ func autoRefreshClusterLinkVolatileAddresses(ctx context.Context, s *state.State
 	}
 
 	return nil
+}
+
+// swagger:operation GET /1.0/cluster/links/{name}/state cluster-links cluster_link_state_get
+//
+//	Get the cluster link state
+//
+//	Get a specific cluster link state.
+//
+//	---
+//	produces:
+//	  - application/json
+//	parameters:
+//	  - in: query
+//	    name: target
+//	    description: Cluster member name
+//	    type: string
+//	    example: lxd01
+//	responses:
+//	  "200":
+//	    description: Cluster link state
+//	    schema:
+//	      type: object
+//	      description: Sync response
+//	      properties:
+//	        type:
+//	          type: string
+//	          description: Response type
+//	          example: sync
+//	        status:
+//	          type: string
+//	          description: Status description
+//	          example: Success
+//	        status_code:
+//	          type: integer
+//	          description: Status code
+//	          example: 200
+//	        metadata:
+//	          $ref: "#/definitions/ClusterLinkState"
+//	  "400":
+//	    $ref: "#/responses/BadRequest"
+//	  "403":
+//	    $ref: "#/responses/Forbidden"
+//	  "500":
+//	    $ref: "#/responses/InternalServerError"
+func clusterLinkStateGet(d *Daemon, r *http.Request) response.Response {
+	s := d.State()
+
+	target := request.QueryParam(r, "target")
+	resp := forwardedResponseToNode(r.Context(), s, target)
+	if resp != nil {
+		return resp
+	}
+
+	name, err := url.PathUnescape(mux.Vars(r)["name"])
+	if err != nil {
+		return response.SmartError(err)
+	}
+
+	l := logger.AddContext(logger.Ctx{"clusterLinkName": name})
+
+	var clusterLink *api.ClusterLink
+	clusterCert, err := util.LoadClusterCert(s.OS.VarDir)
+	if err != nil {
+		return response.InternalError(err)
+	}
+
+	var targetCert *x509.Certificate
+	err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+		dbClusterLink, err := dbCluster.GetClusterLink(ctx, tx.Tx(), name)
+		if err != nil {
+			return err
+		}
+
+		clusterLink, err = dbClusterLink.ToAPI(ctx, tx.Tx())
+		if err != nil {
+			return err
+		}
+
+		identity, err := dbCluster.GetIdentityByID(ctx, tx.Tx(), dbClusterLink.IdentityID)
+		if err != nil {
+			return fmt.Errorf("Failed loading cluster link identity: %w", err)
+		}
+
+		targetCert, err = identity.X509()
+		return err
+	})
+	if err != nil {
+		return response.SmartError(fmt.Errorf("Failed loading cluster link %q: %w", name, err))
+	}
+
+	args := cluster.GetClusterLinkConnectionArgs(clusterCert, targetCert)
+	args.SkipGetServer = true
+
+	// Determine cluster link member status by establishing a connection to each member's address.
+	// Before establishing a connection, we assume the member is unreachable. Once a connection is established, we update the member's status to unauthenticated. If the returned response data contains an "auth" field with the value "trusted", we update the member's status to active.
+	addresses := shared.SplitNTrimSpace(clusterLink.Config["volatile.addresses"], ",", -1, false)
+	clusterLinkState := api.ClusterLinkState{
+		ClusterLinkMembersState: make([]api.ClusterLinkMemberState, len(addresses)),
+	}
+
+	if len(addresses) == 0 {
+		return response.BadRequest(errors.New("No cluster link member addresses found"))
+	}
+
+	var wg sync.WaitGroup
+	for i, address := range addresses {
+		wg.Go(func() {
+			clusterLinkMember := api.ClusterLinkMemberState{
+				Address: address,
+				Status:  api.ClusterLinkMemberStatusUnreachable,
+			}
+
+			targetClient, err := lxd.ConnectLXD("https://"+address, args)
+			if err != nil {
+				l.Warn("Failed connecting to cluster link member", logger.Ctx{"address": address, "err": err})
+			} else {
+				resp, _, err := targetClient.RawQuery(http.MethodGet, "/1.0", nil, "")
+				if err != nil {
+					l.Warn("Failed querying cluster link member", logger.Ctx{"address": address, "err": err})
+				} else {
+					var serverInfo api.Server
+					// api.Server is the canonical response type for /1.0, but it embeds shared API structs without full json tags.
+					//nolint:musttag
+					_ = json.Unmarshal(resp.Metadata, &serverInfo)
+
+					// When the cluster link member is reachable, move its status from unreachable to unauthenticated.
+					if resp.StatusCode == http.StatusOK {
+						clusterLinkMember.Status = api.ClusterLinkMemberStatusUnauthenticated
+					}
+
+					// Set [api.ClusterLinkMemberState.Status] based on the "auth" field.
+					// The status is only considered active when the value of "auth" is "trusted".
+					if serverInfo.Auth == api.AuthTrusted {
+						clusterLinkMember.Status = api.ClusterLinkMemberStatusActive
+					}
+
+					clusterLinkMember.ServerName = serverInfo.Environment.ServerName
+				}
+			}
+
+			clusterLinkState.ClusterLinkMembersState[i] = clusterLinkMember
+		})
+	}
+
+	wg.Wait()
+
+	return response.SyncResponse(true, clusterLinkState)
 }
