@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -33,8 +34,18 @@ type NB struct {
 	sslClientKey  string
 }
 
+var nb *NB
+var nbMutex sync.Mutex
+
 // NewNB initialises new OVN client for Northbound operations.
 func NewNB(dbAddr string, sslSettings func() (sslCACert string, sslClientCert string, sslClientKey string)) (*NB, error) {
+	nbMutex.Lock()
+	defer nbMutex.Unlock()
+
+	if nb != nil {
+		return nb, nil
+	}
+
 	after, ok := strings.CutPrefix(dbAddr, "unix:")
 	if ok {
 		dbAddr = "unix:" + shared.HostPathFollow(after)
