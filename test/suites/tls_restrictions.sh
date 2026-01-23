@@ -301,7 +301,19 @@ test_tls_restrictions() {
 
   # Create instances in the default project and in the blah project that use the network
   ensure_import_testimage
+
+  echo "------------------  TESTING  ----------------------------------------------------------"
+  lxd sql global "SELECT image_id, profile_id FROM images_profiles"
+  lxc image show testimage --project default
+
   lxc image copy testimage local: --project default --target-project blah
+  # lxc project set blah features.images=false # Without this, for some reason profile from blah project doesn't get associated.
+
+  lxd sql global "SELECT image_id, profile_id FROM images_profiles"
+  lxc image show testimage --project default
+  lxc image show testimage --project blah
+  lxc project show blah
+
   lxc init testimage foo --network "${networkName}"
   lxc_remote init testimage localhost:bar --network "${networkName}" --project blah
 

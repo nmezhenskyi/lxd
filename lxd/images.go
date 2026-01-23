@@ -643,13 +643,16 @@ func imgPostRemoteInfo(ctx context.Context, s *state.State, req api.ImagesPost, 
 			profileIDs = append(profileIDs, profileID)
 		}
 
-		// Find IDs of profiles that have matching names in other projects.
-		otherProfileIDs, err := getProfileIDsFromOtherProjects(ctx, tx, profileProject, req.Profiles)
-		if err != nil {
-			return err
-		}
+		// Handle the case when an image is being copied into the project with "features.images" disabled.
+		if imageProject == api.ProjectDefaultName {
+			// Find IDs of profiles that have matching names in other projects.
+			otherProfileIDs, err := getProfileIDsFromOtherProjects(ctx, tx, profileProject, req.Profiles)
+			if err != nil {
+				return err
+			}
 
-		profileIDs = append(profileIDs, otherProfileIDs...)
+			profileIDs = append(profileIDs, otherProfileIDs...)
+		}
 
 		// Update the DB record if needed
 		if req.Public || req.AutoUpdate || req.Filename != "" || len(req.Properties) > 0 || len(req.Profiles) > 0 {
@@ -5258,6 +5261,15 @@ func getProfileIDsFromOtherProjects(ctx context.Context, tx *db.ClusterTx, curre
 
 	for _, projectName := range projects {
 		if projectName == currentProject {
+			continue
+		}
+
+		hasImages, err := dbCluster.ProjectHasImages(ctx, tx.Tx(), projectName)
+		if err != nil {
+			return nil, fmt.Errorf("Failed loading features.images value for project %q: %w", projectName, err)
+		}
+
+		if hasImages && projectName != api.ProjectDefaultName {
 			continue
 		}
 

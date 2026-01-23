@@ -63,7 +63,7 @@ func ensureDownloadedImageFitWithinBudget(ctx context.Context, s *state.State, o
 	imgProject := p.Name
 
 	// If "features.images" is disabled for the project, associate the image with the "default" project.
-	if shared.IsFalse(p.Config["features.images"]) {
+	if shared.IsFalseOrEmpty(p.Config["features.images"]) {
 		imgProject = api.ProjectDefaultName
 	}
 
