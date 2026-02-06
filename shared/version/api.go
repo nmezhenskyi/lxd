@@ -483,6 +483,7 @@ var APIExtensions = []string{
 	"bulk_operations",
 	"ovn_dynamic_northbound_connection",
 	"cluster_links",
+	"image_registries",
 }
 
 // APIExtensionsCount returns the number of available API extensions.
