@@ -485,6 +485,7 @@ var APIExtensions = []string{
 	"storage_zfs_promote",
 	"storage_and_network_operations",
 	"cluster_links",
+	"image_registries",
 }
 
 // APIExtensionsCount returns the number of available API extensions.
