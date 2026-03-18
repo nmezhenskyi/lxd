@@ -52,6 +52,25 @@ type ImageRegistryFilter struct {
 	Builtin *bool
 }
 
+// ToAPI converts the database [ImageRegistry] struct to API type [api.ImageRegistry].
+func (r *ImageRegistry) ToAPI(ctx context.Context, tx *sql.Tx) (*api.ImageRegistry, error) {
+	imageRegistry := &api.ImageRegistry{
+		Name:        r.Name,
+		Description: r.Description,
+		Protocol:    string(r.Protocol),
+		Builtin:     r.Builtin,
+	}
+
+	config, err := imageRegistryConfigGet(ctx, tx, r.ID)
+	if err != nil {
+		return nil, fmt.Errorf("Failed fetching config for image registry %q: %w", r.Name, err)
+	}
+
+	imageRegistry.Config = config
+
+	return imageRegistry, nil
+}
+
 // ImageRegistryProtocol represents the types of supported image registry protocols.
 //
 // This type implements the [sql.Scanner] and [driver.Value] interfaces to automatically handle
