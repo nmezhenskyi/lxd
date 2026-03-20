@@ -1348,9 +1348,16 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 			}
 
 		case api.SourceTypeImage:
+			// Resolve the source project for the image.
+			imgProject := targetProject.Name
+			if req.Source.Project != "" {
+				// If source project is explicitly provided, use it.
+				imgProject = req.Source.Project
+			}
+
 			// Check if the image has an entry in the database but fail only if the error
 			// is different than the image not being found.
-			sourceImage, err = getSourceImageFromInstanceSource(ctx, s, tx, targetProject.Name, req.Source, &sourceImageRef, string(req.Type))
+			sourceImage, err = getSourceImageFromInstanceSource(ctx, s, tx, imgProject, req.Source, &sourceImageRef, string(req.Type))
 			if err != nil && !api.StatusErrorCheck(err, http.StatusNotFound) {
 				return err
 			}

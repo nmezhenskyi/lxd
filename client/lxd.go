@@ -94,36 +94,39 @@ func (r *ProtocolLXD) GetConnectionInfo() (*ConnectionInfo, error) {
 
 // isSameServer compares the calling ProtocolLXD object with the provided server object to check if they are the same server.
 // It verifies the equality based on their connection information (Protocol, Certificate, Project, and Target).
-func (r *ProtocolLXD) isSameServer(server Server) bool {
+func (r *ProtocolLXD) isSameServer(server Server) (sameServer bool, sameProject bool) {
 	// Short path checking if the two structs are identical.
 	if r == server {
-		return true
+		return true, true
 	}
 
 	// Short path if either of the structs are nil.
 	if r == nil || server == nil {
-		return false
+		return false, false
 	}
 
 	// When dealing with uninitialized servers, we can't safely compare.
 	if r.server == nil {
-		return false
+		return false, false
 	}
 
 	// Get the connection info from both servers.
 	srcInfo, err := r.GetConnectionInfo()
 	if err != nil {
-		return false
+		return false, false
 	}
 
 	dstInfo, err := server.GetConnectionInfo()
 	if err != nil {
-		return false
+		return false, false
 	}
 
 	// Check whether we're dealing with the same server.
-	return srcInfo.Protocol == dstInfo.Protocol && srcInfo.Certificate == dstInfo.Certificate &&
-		srcInfo.Project == dstInfo.Project && srcInfo.Target == dstInfo.Target
+	sameServer = srcInfo.Protocol == dstInfo.Protocol && srcInfo.Certificate == dstInfo.Certificate && srcInfo.Target == dstInfo.Target
+	// Check whether we're dealing with the same project.
+	sameProject = srcInfo.Project == dstInfo.Project
+
+	return sameServer, sameProject
 }
 
 // GetHTTPClient returns the http client used for the connection. This can be used to set custom http options.
@@ -464,7 +467,8 @@ func (r *ProtocolLXD) getSourceImageConnectionInfo(source ImageServer, image api
 	instSrc.Type = api.SourceTypeImage
 
 	// Optimization for the local image case
-	if r.isSameServer(source) {
+	sameServer, _ := r.isSameServer(source)
+	if sameServer {
 		// Always use fingerprints for local case
 		instSrc.Fingerprint = image.Fingerprint
 		instSrc.Alias = ""

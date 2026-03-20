@@ -722,7 +722,8 @@ func (r *ProtocolLXD) tryCopyImage(req api.ImagesPost, urls []string) (RemoteOpe
 // CopyImage copies an image from a remote server. Additional options can be passed using ImageCopyArgs.
 func (r *ProtocolLXD) CopyImage(source ImageServer, image api.Image, args *ImageCopyArgs) (RemoteOperation, error) {
 	// Quick checks.
-	if r.isSameServer(source) {
+	sameServer, sameProject := r.isSameServer(source)
+	if sameServer && sameProject {
 		return nil, errors.New("The source and target servers must be different")
 	}
 
