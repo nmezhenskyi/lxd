@@ -620,6 +620,9 @@ type ImageCopyArgs struct {
 
 	// List of profiles to apply on the target.
 	Profiles []string
+
+	// Source image registry to use.
+	ImageRegistry string
 }
 
 // The StoragePoolVolumeCopyArgs struct is used to pass additional options
