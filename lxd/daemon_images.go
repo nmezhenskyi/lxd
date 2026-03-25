@@ -2,12 +2,8 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,26 +15,25 @@ import (
 	"github.com/canonical/lxd/lxd/lifecycle"
 	"github.com/canonical/lxd/lxd/locking"
 	"github.com/canonical/lxd/lxd/operations"
+	"github.com/canonical/lxd/lxd/registry"
 	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/rsync"
 	"github.com/canonical/lxd/lxd/state"
-	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/cancel"
 	"github.com/canonical/lxd/shared/ioprogress"
 	"github.com/canonical/lxd/shared/logger"
-	"github.com/canonical/lxd/shared/units"
-	"github.com/canonical/lxd/shared/version"
 )
 
 // ImageDownloadArgs used with ImageDownload.
 type ImageDownloadArgs struct {
 	ProjectName       string
-	Server            string
-	Protocol          string
-	Certificate       string
+	Server            string // Deprecated.
+	Protocol          string // Deprecated.
+	Certificate       string // Deprecated.
+	ImageRegistry     string
 	Secret            string
 	Alias             string
 	Type              string
@@ -63,16 +58,30 @@ func imageOperationLock(fingerprint string) (locking.UnlockFunc, error) {
 
 // ImageDownload resolves the image fingerprint and if not in the database, downloads it.
 func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation, args *ImageDownloadArgs) (*api.Image, error) {
-	l := logger.AddContext(logger.Ctx{"image": args.Alias, "member": s.ServerName, "project": args.ProjectName, "pool": args.StoragePool, "source": args.Server})
+	l := logger.AddContext(logger.Ctx{"image": args.Alias, "member": s.ServerName, "project": args.ProjectName, "pool": args.StoragePool, "image_registry": args.ImageRegistry})
 
-	var err error
-	var remote lxd.ImageServer
+	var imageRegistry *api.ImageRegistry
+	var server lxd.ImageServer
 	var info *api.Image
+	var err error
 
-	// Default protocol is LXD. Copy so that local modifications aren't propagated to args.
-	protocol := args.Protocol
-	if protocol == "" {
-		protocol = "lxd"
+	// TODO: handle the case when the image is local (ImageRegistry="").
+	if args.ImageRegistry == "" {
+
+	}
+
+	// Fetch the source image registry.
+	err = s.DB.Cluster.Transaction(ctx, func(ctx context.Context, tx *db.ClusterTx) error {
+		dbImageRegistry, err := cluster.GetImageRegistry(ctx, tx.Tx(), args.ImageRegistry)
+		if err != nil {
+			return fmt.Errorf("Failed fetching image registry %q: %w", args.ImageRegistry, err)
+		}
+
+		imageRegistry, err = dbImageRegistry.ToAPI(ctx, tx.Tx())
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	// Copy so that local modifications aren't propagated to args.
@@ -81,51 +90,27 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	// Default the fingerprint to the alias string we received
 	fp := alias
 
-	// Attempt to resolve the alias
-	if slices.Contains([]string{"lxd", "simplestreams"}, protocol) {
-		clientArgs := &lxd.ConnectionArgs{
-			TLSServerCert: args.Certificate,
-			UserAgent:     version.UserAgent,
-			Proxy:         s.Proxy,
-			CachePath:     s.OS.CacheDir,
-			CacheExpiry:   time.Hour,
+	// Connect to the image server.
+	server, err = registry.ConnectImageRegistry(ctx, s, *imageRegistry)
+	if err != nil {
+		return nil, err
+	}
+
+	// For public images, handle aliases and initial metadata
+	if args.Secret == "" {
+		// Look for a matching alias
+		entry, _, err := server.GetImageAliasType(args.Type, fp)
+		if err == nil {
+			fp = entry.Target
 		}
 
-		if protocol == "lxd" {
-			// Setup LXD client
-			remote, err = lxd.ConnectPublicLXD(args.Server, clientArgs)
-			if err != nil {
-				return nil, fmt.Errorf("Failed connecting to LXD server %q: %w", args.Server, err)
-			}
-
-			server, ok := remote.(lxd.InstanceServer)
-			if ok {
-				remote = server.UseProject(args.SourceProjectName)
-			}
-		} else {
-			// Setup simplestreams client
-			remote, err = lxd.ConnectSimpleStreams(args.Server, clientArgs)
-			if err != nil {
-				return nil, fmt.Errorf("Failed connecting to simple streams server %q: %w", args.Server, err)
-			}
+		// Expand partial fingerprints
+		info, _, err = server.GetImage(fp)
+		if err != nil {
+			return nil, fmt.Errorf("Failed getting remote image info: %w", err)
 		}
 
-		// For public images, handle aliases and initial metadata
-		if args.Secret == "" {
-			// Look for a matching alias
-			entry, _, err := remote.GetImageAliasType(args.Type, fp)
-			if err == nil {
-				fp = entry.Target
-			}
-
-			// Expand partial fingerprints
-			info, _, err = remote.GetImage(fp)
-			if err != nil {
-				return nil, fmt.Errorf("Failed getting remote image info: %w", err)
-			}
-
-			fp = info.Fingerprint
-		}
+		fp = info.Fingerprint
 	}
 
 	// Ensure we are the only ones operating on this image.
@@ -146,6 +131,7 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	if args.PreferCached && interval > 0 && alias != fp {
 		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 			for _, architecture := range s.OS.Architectures {
+				// TODO: Use image registry instead of Server and Protocol.
 				cachedFingerprint, err := tx.GetCachedImageSourceFingerprint(ctx, args.Server, args.Protocol, alias, args.Type, architecture)
 				if err == nil && cachedFingerprint != fp {
 					fp = cachedFingerprint
@@ -372,8 +358,8 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 		canceler = cancel.NewHTTPRequestCancellerWithContext(ctx)
 	}
 
-	switch protocol {
-	case "lxd", "simplestreams":
+	switch imageRegistry.Protocol {
+	case api.ImageRegistryProtocolLXD, api.ImageRegistryProtocolSimpleStreams:
 		// Create the target files
 		dest, err := os.Create(destName)
 		if err != nil {
@@ -392,7 +378,7 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 		// Get the image information
 		if info == nil {
 			if args.Secret != "" {
-				info, _, err = remote.GetPrivateImage(fp, args.Secret)
+				info, _, err = server.GetPrivateImage(fp, args.Secret)
 				if err != nil {
 					return nil, err
 				}
@@ -401,7 +387,7 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 				fp = info.Fingerprint
 				alias = info.Fingerprint
 			} else {
-				info, _, err = remote.GetImage(fp)
+				info, _, err = server.GetImage(fp)
 				if err != nil {
 					return nil, err
 				}
@@ -435,9 +421,9 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 		}
 
 		if args.Secret != "" {
-			resp, err = remote.GetPrivateImageFile(fp, args.Secret, request)
+			resp, err = server.GetPrivateImageFile(fp, args.Secret, request)
 		} else {
-			resp, err = remote.GetImageFile(fp, request)
+			resp, err = server.GetImageFile(fp, request)
 		}
 
 		if err != nil {
@@ -475,97 +461,8 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 			return nil, err
 		}
 
-	case "direct":
-		// Setup HTTP client
-		httpClient, err := util.HTTPClient(args.Certificate, s.Proxy)
-		if err != nil {
-			return nil, err
-		}
-
-		// Use relatively short response header timeout so as not to hold the image lock open too long.
-		httpTransport, ok := httpClient.Transport.(*http.Transport)
-		if !ok {
-			return nil, errors.New("Invalid http client type")
-		}
-
-		httpTransport.ResponseHeaderTimeout = 30 * time.Second
-
-		req, err := http.NewRequest(http.MethodGet, args.Server, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		req.Header.Set("User-Agent", version.UserAgent)
-
-		// Make the request
-		raw, doneCh, err := cancel.CancelableDownload(canceler, httpClient.Do, req)
-		if err != nil {
-			return nil, err
-		}
-
-		defer close(doneCh)
-
-		if raw.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("Cannot fetch %q: %s", args.Server, raw.Status)
-		}
-
-		// Progress handler
-		body := &ioprogress.ProgressReader{
-			ReadCloser: raw.Body,
-			Tracker: &ioprogress.ProgressTracker{
-				Length: raw.ContentLength,
-				Handler: func(percent int64, speed int64) {
-					progress(ioprogress.ProgressData{Text: fmt.Sprintf("%d%% (%s/s)", percent, units.GetByteSizeString(speed, 2))})
-				},
-			},
-		}
-
-		// Create the target files
-		f, err := os.Create(destName)
-		if err != nil {
-			return nil, err
-		}
-
-		defer func() { _ = f.Close() }()
-
-		// Hashing
-		sha256 := sha256.New()
-
-		// Download the image
-		writer := shared.NewQuotaWriter(io.MultiWriter(f, sha256), args.Budget)
-		size, err := io.Copy(writer, body)
-		if err != nil {
-			return nil, err
-		}
-
-		// Validate hash
-		result := hex.EncodeToString(sha256.Sum(nil))
-		if result != fp {
-			return nil, fmt.Errorf("Hash mismatch for %q: %s != %s", args.Server, result, fp)
-		}
-
-		// Parse the image
-		imageMeta, imageType, err := getImageMetadata(destName)
-		if err != nil {
-			return nil, err
-		}
-
-		info = &api.Image{}
-		info.Fingerprint = fp
-		info.Size = size
-		info.Architecture = imageMeta.Architecture
-		info.CreatedAt = time.Unix(imageMeta.CreationDate, 0)
-		info.ExpiresAt = time.Unix(imageMeta.ExpiryDate, 0)
-		info.Properties = imageMeta.Properties
-		info.Type = imageType
-
-		err = f.Close()
-		if err != nil {
-			return nil, err
-		}
-
 	default:
-		return nil, fmt.Errorf("Unsupported protocol: %v", protocol)
+		return nil, fmt.Errorf("Unsupported protocol: %v", imageRegistry.Protocol)
 	}
 
 	// Override visiblity
@@ -611,7 +508,8 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 				return err
 			}
 
-			return tx.CreateImageSource(ctx, id, args.Server, protocol, args.Certificate, alias)
+			// TODO: use image registry instead of server, protocol, certificate.
+			return tx.CreateImageSource(ctx, id, args.Server, imageRegistry.Protocol, args.Certificate, alias)
 		})
 		if err != nil {
 			return nil, err
