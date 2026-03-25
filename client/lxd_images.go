@@ -619,7 +619,9 @@ func (r *ProtocolLXD) CreateImage(image api.ImagesPost, args *ImageCreateArgs) (
 
 // tryCopyImage iterates through the source server URLs until one lets it download the image.
 func (r *ProtocolLXD) tryCopyImage(req api.ImagesPost, urls []string) (RemoteOperation, error) {
-	if len(urls) == 0 && req.Source.ImageRegistry == "" {
+	// If no source URLs are provided, we must be using a server-side resolution path (either a remote
+	// image registry or a local image in another project).
+	if len(urls) == 0 && req.Source.ImageRegistry == "" && req.Source.Project == "" {
 		return nil, errors.New("The source server is not listening on the network")
 	}
 
@@ -678,12 +680,14 @@ func (r *ProtocolLXD) tryCopyImage(req api.ImagesPost, urls []string) (RemoteOpe
 		success := false
 		var errors []remoteOperationResult
 
-		if req.Source.ImageRegistry != "" {
-			// When using an image registry, the server handles resolution, so we don't iterate over URLs.
+		if len(urls) == 0 {
+			// When no source URLs are provided, we rely on the target server to resolve and fetch
+			// the image (either from a remote image registry or from its own local image store).
 			op, err := r.CreateImage(req, nil)
 			if err != nil {
 				errors = append(errors, remoteOperationResult{Error: err})
 			} else {
+
 				rop.handlerLock.Lock()
 				rop.targetOp = op
 				rop.handlerLock.Unlock()
@@ -701,6 +705,7 @@ func (r *ProtocolLXD) tryCopyImage(req api.ImagesPost, urls []string) (RemoteOpe
 			}
 		} else {
 			for _, serverURL := range urls {
+
 				req.Source.Server = serverURL
 
 				op, err := r.CreateImage(req, nil)
@@ -933,8 +938,8 @@ func (r *ProtocolLXD) CopyImage(source ImageServer, image api.Image, args *Image
 
 			return &rop, nil
 		}
-	} else if args == nil || args.ImageRegistry == "" {
-		return nil, errors.New("Missing source server or image registry")
+	} else if args == nil {
+		return nil, errors.New("Missing copy arguments")
 	}
 
 	// Prepare the copy request
@@ -956,7 +961,11 @@ func (r *ProtocolLXD) CopyImage(source ImageServer, image api.Image, args *Image
 		req.Source.Protocol = info.Protocol
 		req.Source.Project = info.Project
 	} else {
+		// If no source server is provided, we use server-side resolution.
+		// This can either be through a remote image registry or from the target
+		// server's own local image store (e.g., when copying between projects).
 		req.Source.ImageRegistry = args.ImageRegistry
+		req.Source.Project = image.Project
 		if args != nil {
 			req.Source.CopyAliases = args.CopyAliases
 		}

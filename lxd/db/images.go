@@ -433,8 +433,8 @@ func (c *ClusterTx) GetImageAlias(ctx context.Context, projectName string, image
 			 FROM images_aliases
 			 INNER JOIN images
 			 ON images_aliases.image_id=images.id
-                         INNER JOIN projects
-                         ON images_aliases.project_id=projects.id
+				 INNER JOIN projects
+				 ON images_aliases.project_id=projects.id
 			 WHERE projects.name=? AND images_aliases.name=?`
 	if !isTrustedClient {
 		q = q + ` AND images.public=1`
@@ -455,6 +455,43 @@ func (c *ClusterTx) GetImageAlias(ctx context.Context, projectName string, image
 	arg1 := []any{projectName, imageName}
 	arg2 := []any{&id, &fingerprint, &imageType, &description}
 	err = c.tx.QueryRowContext(ctx, q, arg1...).Scan(arg2...)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return -1, api.ImageAliasesEntry{}, api.StatusErrorf(http.StatusNotFound, "Image alias not found")
+		}
+
+		return 0, entry, err
+	}
+
+	entry.Name = imageName
+	entry.Target = fingerprint
+	entry.Description = description
+	entry.Type = instancetype.Type(imageType).String()
+
+	return id, entry, nil
+}
+
+// GetImageAliasFromAnyProject returns the alias with the given name from any project.
+func (c *ClusterTx) GetImageAliasFromAnyProject(ctx context.Context, imageName string, isTrustedClient bool) (int, api.ImageAliasesEntry, error) {
+	id := -1
+	entry := api.ImageAliasesEntry{}
+	q := `SELECT images_aliases.id, images.fingerprint, images.type, images_aliases.description
+			 FROM images_aliases
+			 INNER JOIN images
+			 ON images_aliases.image_id=images.id
+				 INNER JOIN projects
+				 ON images_aliases.project_id=projects.id
+			 WHERE images_aliases.name=?`
+	if !isTrustedClient {
+		q = q + ` AND images.public=1`
+	}
+
+	var fingerprint, description string
+	var imageType int
+
+	arg1 := []any{imageName}
+	arg2 := []any{&id, &fingerprint, &imageType, &description}
+	err := c.tx.QueryRowContext(ctx, q, arg1...).Scan(arg2...)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return -1, api.ImageAliasesEntry{}, api.StatusErrorf(http.StatusNotFound, "Image alias not found")

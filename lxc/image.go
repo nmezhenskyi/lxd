@@ -213,21 +213,55 @@ func (c *cmdImageCopy) run(cmd *cobra.Command, args []string) error {
 	}
 
 	destinationServer := resources[0].server
+	destRemote := resources[0].remote
 
 	var sourceServer lxd.ImageServer
 	var imgInfo *api.Image
 
 	if destinationServer.HasExtension("image_registries") {
+		// If the destination server supports image registries, we can use server-side image
+		// resolution and download (pull mode).
 		if c.flagMode != "pull" {
 			return errors.New("Only pull mode is supported for image registries")
 		}
 
-		// Use the remote as an image registry.
-		sourceServer = nil
-		imgInfo = &api.Image{
-			Fingerprint: name,
+		sourceRemote := remoteName
+		if sourceRemote == "" {
+			sourceRemote = c.global.conf.DefaultRemote
+		}
+
+		// Check if we are performing a local copy (from the same server).
+		if sourceRemote == destRemote {
+			// When copying from the local server, we treat it as a local-to-local transfer.
+			// The server will resolve the image from its own image store across projects.
+			sourceServer = nil
+
+			// Determine the source project. Fallback order:
+			// 1. Project override (from --project flag)
+			// 2. Project configured for the source remote
+			// 3. Default project ("default")
+			sourceProject := c.global.conf.ProjectOverride
+			if sourceProject == "" {
+				sourceProject = c.global.conf.Remotes[sourceRemote].Project
+			}
+
+			if sourceProject == "" {
+				sourceProject = api.ProjectDefaultName
+			}
+
+			imgInfo = &api.Image{
+				Fingerprint: name,
+				Project:     sourceProject,
+			}
+		} else {
+			// Treat the source remote as a remote image registry.
+			sourceServer = nil
+			imgInfo = &api.Image{
+				Fingerprint: name,
+			}
 		}
 	} else {
+
 		// Fallback to legacy remote lookup.
 		sourceServer, err = c.global.conf.GetImageServer(remoteName)
 		if err != nil {
@@ -286,7 +320,15 @@ func (c *cmdImageCopy) run(cmd *cobra.Command, args []string) error {
 	}
 
 	if sourceServer == nil {
-		copyArgs.ImageRegistry = remoteName
+		sourceRemote := remoteName
+		if sourceRemote == "" {
+			sourceRemote = c.global.conf.DefaultRemote
+		}
+
+		// Set the registry only if the source is not the local server.
+		if sourceRemote != destRemote {
+			copyArgs.ImageRegistry = remoteName
+		}
 	}
 
 	// Do the copy

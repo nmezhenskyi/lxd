@@ -663,9 +663,41 @@ func imgPostRemoteInfo(ctx context.Context, s *state.State, req api.ImagesPost, 
 			}
 		}
 
-		// Apply aliases from the source.
-		if req.Source.CopyAliases {
+		// Create any requested aliases.
+		for _, alias := range req.Aliases {
+			_, _, err := tx.GetImageAlias(ctx, imageProject, alias.Name, true)
+			if !response.IsNotFoundError(err) {
+				if err != nil {
+					return fmt.Errorf("Fetch image alias %q: %w", alias.Name, err)
+				}
+
+				return fmt.Errorf("Alias already exists: %s", alias.Name)
+			}
+
+			err = tx.CreateImageAlias(ctx, imageProject, alias.Name, id, alias.Description)
+			if err != nil {
+				return fmt.Errorf("Add new image alias to the database: %w", err)
+			}
+		}
+
+		// Copy aliases from the source image if requested and if the source is either a remote registry
+		// or a different local project.
+		if req.Source.CopyAliases && (req.Source.ImageRegistry != "" || (req.Source.Project != "" && req.Source.Project != imageProject)) {
 			for _, alias := range remoteAliases {
+				// Skip the source alias if the same alias name was explicitly requested in req.Aliases.
+				found := false
+				for _, a := range req.Aliases {
+					if a.Name == alias.Name {
+						found = true
+						break
+					}
+				}
+
+				if found {
+					continue
+				}
+
+				// Check if the alias already exists in the target project.
 				_, _, err := tx.GetImageAlias(ctx, imageProject, alias.Name, true)
 				if !response.IsNotFoundError(err) {
 					if err != nil {
@@ -675,6 +707,7 @@ func imgPostRemoteInfo(ctx context.Context, s *state.State, req api.ImagesPost, 
 					return fmt.Errorf("Alias already exists: %s", alias.Name)
 				}
 
+				// Create the alias in the target project.
 				err = tx.CreateImageAlias(ctx, imageProject, alias.Name, id, alias.Description)
 				if err != nil {
 					return fmt.Errorf("Add new image alias to the database: %w", err)
@@ -689,7 +722,7 @@ func imgPostRemoteInfo(ctx context.Context, s *state.State, req api.ImagesPost, 
 	}
 
 	// Set aliases from the source so that they can be applied later.
-	// info.Aliases = remoteAliases
+	info.Aliases = remoteAliases
 
 	return info, nil
 }
@@ -1432,7 +1465,11 @@ func imagesPost(d *Daemon, r *http.Request) response.Response {
 			return nil
 		}
 
-		// Apply any provided alias
+		// Apply any provided alias (unless this is a remote image copy, which is handled in imgPostRemoteInfo).
+		if !imageUpload && req.Source != nil && req.Source.Type == "image" {
+			return nil
+		}
+
 		aliases, ok := imageMetadata["aliases"]
 		if ok {
 			req.Aliases, ok = aliases.([]api.ImageAlias)

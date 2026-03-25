@@ -65,52 +65,77 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	var info *api.Image
 	var err error
 
-	// TODO: handle the case when the image is local (ImageRegistry="").
-	if args.ImageRegistry == "" {
-
-	}
-
-	// Fetch the source image registry.
-	err = s.DB.Cluster.Transaction(ctx, func(ctx context.Context, tx *db.ClusterTx) error {
-		dbImageRegistry, err := cluster.GetImageRegistry(ctx, tx.Tx(), args.ImageRegistry)
-		if err != nil {
-			return fmt.Errorf("Failed fetching image registry %q: %w", args.ImageRegistry, err)
-		}
-
-		imageRegistry, err = dbImageRegistry.ToAPI(ctx, tx.Tx())
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-
 	// Copy so that local modifications aren't propagated to args.
 	alias := args.Alias
 
-	// Default the fingerprint to the alias string we received
+	// Default the fingerprint to the alias string we received.
 	fp := alias
 
-	// Connect to the image server.
-	server, err = registry.ConnectImageRegistry(ctx, s, *imageRegistry)
-	if err != nil {
-		return nil, err
-	}
+	if args.ImageRegistry != "" {
+		// Fetch the source image registry details.
+		err = s.DB.Cluster.Transaction(ctx, func(ctx context.Context, tx *db.ClusterTx) error {
+			dbImageRegistry, err := cluster.GetImageRegistry(ctx, tx.Tx(), args.ImageRegistry)
+			if err != nil {
+				return fmt.Errorf("Failed fetching image registry %q: %w", args.ImageRegistry, err)
+			}
 
-	// For public images, handle aliases and initial metadata
-	if args.Secret == "" {
-		// Look for a matching alias
-		entry, _, err := server.GetImageAliasType(args.Type, fp)
-		if err == nil {
-			fp = entry.Target
-		}
-
-		// Expand partial fingerprints
-		info, _, err = server.GetImage(fp)
+			imageRegistry, err = dbImageRegistry.ToAPI(ctx, tx.Tx())
+			return err
+		})
 		if err != nil {
-			return nil, fmt.Errorf("Failed getting remote image info: %w", err)
+			return nil, err
 		}
 
-		fp = info.Fingerprint
+		// Connect to the remote image server.
+		server, err = registry.ConnectImageRegistry(ctx, s, *imageRegistry)
+		if err != nil {
+			return nil, err
+		}
+
+		// For public images, resolve aliases and fetch initial metadata from the remote server.
+		if args.Secret == "" {
+			// Look for a matching alias on the remote.
+			entry, _, err := server.GetImageAliasType(args.Type, fp)
+			if err == nil {
+				fp = entry.Target
+			}
+
+			// Expand partial fingerprints and fetch full image info.
+			info, _, err = server.GetImage(fp)
+			if err != nil {
+				return nil, fmt.Errorf("Failed getting remote image info: %w", err)
+			}
+
+			fp = info.Fingerprint
+		}
+	} else {
+		// When no registry is provided, we attempt to resolve the provided fingerprint or alias locally.
+		_ = s.DB.Cluster.Transaction(ctx, func(ctx context.Context, tx *db.ClusterTx) error {
+			// Check if the name matches an alias in the target project.
+			_, entry, err := tx.GetImageAlias(ctx, args.ProjectName, fp, true)
+			if err == nil {
+				fp = entry.Target
+				return nil
+			}
+
+			// Check if the name matches an alias in the source project (if different from target).
+			if args.SourceProjectName != "" && args.SourceProjectName != args.ProjectName {
+				_, entry, err = tx.GetImageAlias(ctx, args.SourceProjectName, fp, true)
+				if err == nil {
+					fp = entry.Target
+					return nil
+				}
+			}
+
+			// Finally, attempt to resolve the name as an alias in ANY other project.
+			_, entry, err = tx.GetImageAliasFromAnyProject(ctx, fp, true)
+			if err == nil {
+				fp = entry.Target
+				return nil
+			}
+
+			return nil
+		})
 	}
 
 	// Ensure we are the only ones operating on this image.
@@ -183,31 +208,34 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 			}
 		}
 	} else if response.IsNotFoundError(err) {
+		// If the image doesn't exist in the target project, check across all other projects.
 		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-			// Check if the image already exists in some other project.
 			_, imgInfo, err = tx.GetImageFromAnyProject(ctx, fp)
-
 			return err
 		})
+
 		if err == nil {
+			// Image found in another project. Resolve its current location and source aliases
+			// before preparing the transfer.
 			var nodeAddress string
 			otherProject := imgInfo.Project
+			sourceAliases := imgInfo.Aliases
 
 			err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-				// Check if the image is available locally or it's on another node. Do this before creating
-				// the missing DB record so we don't include ourself in the search results.
+				// Check if the image is already available locally or on another node. We must do this before
+				// inserting the record for the new project to avoid finding ourselves in the search results.
 				nodeAddress, err = tx.LocateImage(ctx, imgInfo.Fingerprint)
 				if err != nil {
 					return fmt.Errorf("Locate image %q in the cluster: %w", imgInfo.Fingerprint, err)
 				}
 
-				// We need to insert the database entry for this project, including the node ID entry.
+				// Create the image record in the database for the new target project.
 				err = tx.CreateImage(ctx, args.ProjectName, imgInfo.Fingerprint, imgInfo.Filename, imgInfo.Size, args.Public, imgInfo.AutoUpdate, imgInfo.Architecture, imgInfo.CreatedAt, imgInfo.ExpiresAt, imgInfo.Properties, imgInfo.Type, nil)
 				if err != nil {
 					return fmt.Errorf("Failed creating image record for project: %w", err)
 				}
 
-				// Mark the image as "cached" if downloading for an instance.
+				// If this is an auto-cached image, set the cached flag and last use date.
 				if args.SetCached {
 					err = tx.SetImageCachedAndLastUseDate(ctx, args.ProjectName, imgInfo.Fingerprint, time.Now().UTC())
 					if err != nil {
@@ -216,10 +244,17 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 				}
 
 				var id int
-
 				id, imgInfo, err = tx.GetImage(ctx, fp, cluster.ImageFilter{Project: &args.ProjectName})
 				if err != nil {
 					return err
+				}
+
+				// Restore the source aliases so the caller can handle them (e.g., if --copy-aliases is used).
+				imgInfo.Aliases = sourceAliases
+
+				// Register the source project/alias so the image can be auto-updated in the future.
+				if args.Protocol == "" {
+					args.Protocol = "lxd"
 				}
 
 				return tx.CreateImageSource(ctx, id, args.Server, args.Protocol, args.Certificate, alias)
@@ -228,15 +263,15 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 				return nil, err
 			}
 
-			// Transfer image if needed (after database record has been created above).
+			// If the image files exist on another cluster node, initiate a transfer.
 			if nodeAddress != "" {
-				// The image is available from another node, let's try to import it.
-				err = instanceImageTransfer(ctx, s, args.ProjectName, otherProject, info.Fingerprint, nodeAddress)
+				err = instanceImageTransfer(ctx, s, args.ProjectName, otherProject, imgInfo.Fingerprint, nodeAddress)
 				if err != nil {
 					return nil, fmt.Errorf("Failed transferring image: %w", err)
 				}
 			} else {
-				// The image is available locally, copy the image files from the source project if these use different storage.
+				// If the image files are available locally but in another project with a different storage volume,
+				// perform a local file copy between storage paths.
 				if s.LocalConfig.StorageImagesVolume(otherProject) != s.LocalConfig.StorageImagesVolume(args.ProjectName) {
 					sourcePath := filepath.Join(s.ImagesStoragePath(otherProject), imgInfo.Fingerprint)
 					destPath := s.ImagesStoragePath(args.ProjectName)
@@ -256,7 +291,6 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 			}
 		}
 	}
-
 	if imgInfo != nil {
 		info = imgInfo
 		l = l.AddContext(logger.Ctx{"fingerprint": info.Fingerprint, "autoUpdate": info.AutoUpdate, "imgProject": info.Project})
@@ -315,6 +349,10 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 
 		l.Debug("Created image on storage pool")
 		return info, nil
+	}
+
+	if args.ImageRegistry == "" {
+		return nil, fmt.Errorf("Image %q not found in the database", fp)
 	}
 
 	// Begin downloading
