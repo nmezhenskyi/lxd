@@ -6,8 +6,10 @@ import (
 	"database/sql/driver"
 	"fmt"
 
+	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/db/query"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 )
 
 // ClusterLinkType represents the type of a cluster link stored as a string in the database.
@@ -175,4 +177,31 @@ func UpdateClusterLinkConfig(ctx context.Context, tx *sql.Tx, clusterLinkID int6
 	}
 
 	return CreateClusterLinkConfig(ctx, tx, clusterLinkID, config)
+}
+
+// GetClusterLinksAndURLs returns all cluster links that pass the given permission filter, along with their entity URLs.
+func GetClusterLinksAndURLs(ctx context.Context, tx *sql.Tx, filter auth.PermissionChecker) ([]*api.ClusterLink, []string, error) {
+	allClusterLinks, err := GetClusterLinks(ctx, tx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Failed loading cluster links: %w", err)
+	}
+
+	apiClusterLinks := make([]*api.ClusterLink, 0, len(allClusterLinks))
+	clusterLinkURLs := make([]string, 0, len(allClusterLinks))
+	for _, clusterLink := range allClusterLinks {
+		u := entity.ClusterLinkURL(clusterLink.Name)
+		if !filter(u) {
+			continue
+		}
+
+		apiClusterLink, err := clusterLink.ToAPI(ctx, tx)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		apiClusterLinks = append(apiClusterLinks, apiClusterLink)
+		clusterLinkURLs = append(clusterLinkURLs, u.String())
+	}
+
+	return apiClusterLinks, clusterLinkURLs, nil
 }
