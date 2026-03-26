@@ -65,10 +65,7 @@ func (c *cmdRebuild) rebuild(conf *config.Config, args []string) error {
 		}
 
 	case 2:
-		iremote, image, err = conf.ParseRemote(args[0])
-		if err != nil {
-			return err
-		}
+		iremote, image = conf.ParseRemoteUnchecked(args[0])
 
 		remote, name, err = conf.ParseRemote(args[1])
 		if err != nil {
@@ -144,18 +141,24 @@ func (c *cmdRebuild) rebuild(conf *config.Config, args []string) error {
 		}
 
 		iremote, image := guessImage(conf, d, remote, iremote, image)
-		imgRemote, imgInfo, err := getImgInfo(d, conf, iremote, remote, image, &req.Source)
+		imgRemoteServer, imgInfo, err := getImgInfo(d, conf, iremote, remote, image, &req.Source)
 		if err != nil {
 			return err
 		}
 
-		if conf.Remotes[iremote].Protocol != "simplestreams" {
+		// Update the source project if it was determined by getImgInfo.
+		if imgRemoteServer == nil && imgInfo.Project != "" {
+			req.Source.Project = imgInfo.Project
+		}
+
+		// Only perform legacy type and protocol checks if we are NOT using an image registry.
+		if imgRemoteServer != nil && conf.Remotes[iremote].Protocol != "simplestreams" {
 			if imgInfo.Type != "virtual-machine" && current.Type == "virtual-machine" {
 				return errors.New("Asked for a VM but image is of type container")
 			}
 		}
 
-		op, err := d.RebuildInstanceFromImage(imgRemote, *imgInfo, name, req)
+		op, err := d.RebuildInstanceFromImage(imgRemoteServer, *imgInfo, name, req)
 		if err != nil {
 			return err
 		}

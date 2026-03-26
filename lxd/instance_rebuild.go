@@ -141,7 +141,7 @@ func instanceRebuildPost(d *Daemon, r *http.Request) response.Response {
 			return instanceRebuildFromEmpty(inst, op)
 		}
 
-		if req.Source.Server != "" {
+		if req.Source.Server != "" || req.Source.ImageRegistry != "" || req.Source.Project != "" {
 			sourceImage, err = ensureDownloadedImageFitWithinBudget(ctx, s, op, *targetProject, sourceImageRef, req.Source, inst.Type().String())
 			if err != nil {
 				return err

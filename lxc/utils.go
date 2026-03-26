@@ -381,11 +381,58 @@ func guessImage(conf *config.Config, d lxd.InstanceServer, instRemote string, im
 // getImgInfo returns an image server and image info for the given image name (given by a user)
 // an image remote and an instance remote.
 func getImgInfo(d lxd.InstanceServer, conf *config.Config, imgRemote string, instRemote string, imageRef string, source *api.InstanceSource) (lxd.ImageServer, *api.Image, error) {
-	var imgRemoteServer lxd.ImageServer
 	var imgInfo *api.Image
+
+	// If the server supports image registries, we can use server-side image resolution and download.
+	// This avoids resolving the image on the client side, and passes the registry name or source project
+	// to the server so it can handle the resolution directly (which works for both public and private images,
+	// and supports features like automatic local caching and alias resolution).
+	if d.HasExtension("image_registries") {
+		// Determine the source project for local copies.
+		sourceRemote := imgRemote
+		if sourceRemote == "" {
+			sourceRemote = conf.DefaultRemote
+		}
+
+		if imgRemote == instRemote {
+			// Local image copy from the same server.
+			// Determine the source project. We try to infer the target project for the source remote,
+			// falling back to the default project. This allows local cross-project image resolution.
+			sourceProject := conf.ProjectOverride
+			if sourceProject == "" {
+				sourceProject = conf.Remotes[sourceRemote].Project
+			}
+
+			if sourceProject == "" {
+				sourceProject = api.ProjectDefaultName
+			}
+
+			imgInfo = &api.Image{
+				Fingerprint: imageRef,
+				Project:     sourceProject,
+			}
+
+			// For local copies, we don't set ImageRegistry to indicate we are resolving locally
+			// across projects within the same server.
+			// source.Project will be set from imgInfo.Project at the call site.
+			return nil, imgInfo, nil
+		}
+
+		// Remote image registry.
+		// We set the registry name on the instance source, so the LXD server handles the download.
+		imgInfo = &api.Image{
+			Fingerprint: imageRef,
+		}
+
+		source.ImageRegistry = imgRemote
+		return nil, imgInfo, nil
+	}
+
+	var imgRemoteServer lxd.ImageServer
 	var err error
 
-	// Connect to the image server
+	// Connect to the image server (legacy client-side resolution path)
+
 	if imgRemote == instRemote {
 		imgRemoteServer = d
 	} else {

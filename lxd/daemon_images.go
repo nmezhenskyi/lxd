@@ -63,6 +63,7 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	var imageRegistry *api.ImageRegistry
 	var server lxd.ImageServer
 	var info *api.Image
+	var sourceAliases []api.ImageAlias
 	var err error
 
 	// Copy so that local modifications aren't propagated to args.
@@ -107,7 +108,9 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 			}
 
 			fp = info.Fingerprint
+			sourceAliases = info.Aliases
 		}
+
 	} else {
 		// When no registry is provided, we attempt to resolve the provided fingerprint or alias locally.
 		_ = s.DB.Cluster.Transaction(ctx, func(ctx context.Context, tx *db.ClusterTx) error {
@@ -296,6 +299,9 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 		l = l.AddContext(logger.Ctx{"fingerprint": info.Fingerprint, "autoUpdate": info.AutoUpdate, "imgProject": info.Project})
 		l.Debug("Image already exists in the DB")
 
+		// Pass the source aliases back to the caller so they can be processed (e.g., if --copy-aliases is used).
+		info.Aliases = sourceAliases
+
 		var poolID int64
 		var poolIDs []int64
 		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
@@ -396,9 +402,11 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 		canceler = cancel.NewHTTPRequestCancellerWithContext(ctx)
 	}
 
+	// Begin registry-based download.
+	// We reach this path if the image was not found in the local database and an ImageRegistry was provided.
 	switch imageRegistry.Protocol {
 	case api.ImageRegistryProtocolLXD, api.ImageRegistryProtocolSimpleStreams:
-		// Create the target files
+		// Create the target files for the image metadata and rootfs.
 		dest, err := os.Create(destName)
 		if err != nil {
 			return nil, err
@@ -413,22 +421,27 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 
 		defer func() { _ = destRootfs.Close() }()
 
-		// Get the image information
+		// Fetch image information if it wasn't already resolved during initial lookup.
 		if info == nil {
 			if args.Secret != "" {
+				// Fetch information for a private image using the provided secret.
 				info, _, err = server.GetPrivateImage(fp, args.Secret)
 				if err != nil {
 					return nil, err
 				}
 
-				// Expand the fingerprint now and mark alias string to match
+				// Update the fingerprint and alias now that the image is identified.
 				fp = info.Fingerprint
 				alias = info.Fingerprint
+				sourceAliases = info.Aliases
 			} else {
+				// Fetch information for a public image.
 				info, _, err = server.GetImage(fp)
 				if err != nil {
 					return nil, err
 				}
+
+				sourceAliases = info.Aliases
 			}
 		}
 
@@ -582,6 +595,8 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	}
 
 	s.Events.SendLifecycle(args.ProjectName, lifecycle.ImageCreated.Event(info.Fingerprint, args.ProjectName, lifecycleRequestor, logger.Ctx{"type": info.Type}))
+
+	info.Aliases = sourceAliases
 
 	return info, nil
 }

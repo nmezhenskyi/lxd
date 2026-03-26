@@ -164,8 +164,8 @@ func (c *cmdImageCopy) command() *cobra.Command {
 The auto-update flag instructs the server to keep this image up to date.
 It requires the source to be an alias and for it to be public.
 
-If the destination LXD server supports image registries, the image source
-must be an image registry.`)
+If the destination LXD server supports image registries, the source image
+must be from an image registry or a local store.`)
 
 	cmd.Flags().BoolVar(&c.flagPublic, "public", false, "Make image public")
 	cmd.Flags().BoolVar(&c.flagCopyAliases, "copy-aliases", false, "Copy aliases from source")
