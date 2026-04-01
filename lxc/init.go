@@ -37,7 +37,7 @@ type cmdInit struct {
 
 func (c *cmdInit) command() *cobra.Command {
 	cmd := &cobra.Command{}
-	cmd.Use = usage("init", "[<remote>:]<image> [<remote>:][<name>]")
+	cmd.Use = usage("init", "[<registry|remote>:]<image> [<remote>:][<name>]")
 	cmd.Short = "Create instances from images"
 	cmd.Long = cli.FormatSection("Description", cmd.Short)
 	cmd.Example = cli.FormatSection("", `lxc init ubuntu:24.04 u1
@@ -56,7 +56,9 @@ Note: The --project flag sets the project for both the image remote and the inst
 If the image remote is a public remote (e.g. simplestreams) then this project is ignored by the image remote.
 If the image remote is another LXD server, specify the source project for the image remote 
 with --project and the instance remote with --target-project (if different from --project).
-`)
+
+If the destination LXD server supports image registries, the source image
+must be from an image registry or a local store.`)
 
 	cmd.RunE = c.run
 	cmd.Flags().StringArrayVarP(&c.flagConfig, "config", "c", nil, cli.FormatStringFlagLabel("Config key/value to apply to the new instance"))
@@ -132,10 +134,7 @@ func (c *cmdInit) create(conf *config.Config, args []string, launch bool) (lxd.I
 	}
 
 	if len(args) > 0 {
-		iremote, image, err = conf.ParseRemote(args[0])
-		if err != nil {
-			return nil, "", err
-		}
+		iremote, image = conf.ParseRemoteUnchecked(args[0])
 
 		if len(args) == 1 {
 			remote, name, err = conf.ParseRemote("")
@@ -352,12 +351,18 @@ func (c *cmdInit) create(conf *config.Config, args []string, launch bool) (lxd.I
 		}
 
 		// Fetch image info from the given remote.
-		imgRemote, imgInfo, err := getImgInfo(d, conf, iremote, remote, image, &req.Source)
+		imgRemoteServer, imgInfo, err := getImgInfo(d, conf, iremote, remote, image, &req.Source)
 		if err != nil {
 			return nil, "", err
 		}
 
-		if conf.Remotes[iremote].Protocol != "simplestreams" {
+		// Update the source project if it was determined by getImgInfo.
+		if imgRemoteServer == nil && imgInfo.Project != "" {
+			req.Source.Project = imgInfo.Project
+		}
+
+		// Only perform legacy type and protocol checks if we are NOT using an image registry.
+		if imgRemoteServer != nil && conf.Remotes[iremote].Protocol != "simplestreams" {
 			if imgInfo.Type != "virtual-machine" && c.flagVM {
 				return nil, "", errors.New("Asked for a VM but image is of type container")
 			}
@@ -366,7 +371,7 @@ func (c *cmdInit) create(conf *config.Config, args []string, launch bool) (lxd.I
 		}
 
 		// Create the instance.
-		op, err := d.CreateInstanceFromImage(imgRemote, *imgInfo, req)
+		op, err := d.CreateInstanceFromImage(imgRemoteServer, *imgInfo, req)
 		if err != nil {
 			return nil, "", err
 		}

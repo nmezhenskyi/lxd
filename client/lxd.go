@@ -463,9 +463,9 @@ func (r *ProtocolLXD) getSourceImageConnectionInfo(source ImageServer, image api
 	// Set the minimal source fields
 	instSrc.Type = api.SourceTypeImage
 
-	// Optimization for the local image case
-	if r.isSameServer(source) {
-		// Always use fingerprints for local case
+	// Optimization for the local image case or image registry case.
+	if r.isSameServer(source) || source == nil || instSrc.ImageRegistry != "" {
+		// Set the fingerprint from the image info.
 		instSrc.Fingerprint = image.Fingerprint
 		instSrc.Alias = ""
 		return nil, nil
