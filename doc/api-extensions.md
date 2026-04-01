@@ -3033,3 +3033,9 @@ This is primarily useful when combined with the `initial.` `disk` device configu
 Storage pool and network endpoints that were previously synchronous now return background operations. This affects create, update, delete, and rename actions on storage pools, networks, network ACLs, network zones, network zone records, network forwards, network load balancers, network peers, and storage buckets (including bucket keys).
 
 Clients should check for this extension and handle the asynchronous response by waiting on the returned operation. Operation metadata may include additional data, such as storage bucket admin credentials on bucket creation.
+
+(extension-image-extended-metadata)=
+## `image_extended_metadata`
+
+Adds `release_codename` and `release_title` fields to the `api.Image` struct. These fields are optional and are populated from the SimpleStreams index when available.
+Also updates the generated image description for SimpleStreams images to include variant if available. The image creation date is no longer used for image description.
