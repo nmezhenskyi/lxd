@@ -32,6 +32,7 @@ import (
 	"github.com/canonical/lxd/lxd/placement"
 	"github.com/canonical/lxd/lxd/project"
 	"github.com/canonical/lxd/lxd/project/limits"
+	"github.com/canonical/lxd/lxd/registry"
 	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/state"
@@ -72,9 +73,7 @@ func ensureDownloadedImageFitWithinBudget(ctx context.Context, s *state.State, o
 	}
 
 	imgDownloaded, err := ImageDownload(ctx, s, op, &ImageDownloadArgs{
-		Server:            source.Server,
-		Protocol:          source.Protocol,
-		Certificate:       source.Certificate,
+		ImageRegistry:     source.ImageRegistry,
 		Secret:            source.Secret,
 		Alias:             imgAlias,
 		SetCached:         true,
@@ -117,7 +116,7 @@ func createFromImage(r *http.Request, s *state.State, p api.Project, profiles []
 			Profiles:    profiles,
 		}
 
-		if req.Source.Server != "" {
+		if req.Source.Server != "" || req.Source.ImageRegistry != "" || req.Source.Project != "" {
 			img, err = ensureDownloadedImageFitWithinBudget(ctx, s, op, p, imgAlias, req.Source, string(req.Type))
 			if err != nil {
 				return err
@@ -1274,6 +1273,32 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 	var targetMemberInfo *db.NodeInfo
 	var targetGroupName string
 	var placementGroupName string
+	var remoteServer lxd.ImageServer
+
+	// If an image registry is specified, we connect to it here before starting the main transaction.
+	// This avoids holding a database transaction open while performing network operations, which
+	// could lead to timeouts or deadlocks in clustered environments.
+	if req.Source.ImageRegistry != "" {
+		var imageRegistry *api.ImageRegistry
+		err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+			dbImageRegistry, err := dbCluster.GetImageRegistry(ctx, tx.Tx(), req.Source.ImageRegistry)
+			if err != nil {
+				return fmt.Errorf("Failed fetching image registry %q: %w", req.Source.ImageRegistry, err)
+			}
+
+			imageRegistry, err = dbImageRegistry.ToAPI(ctx, tx.Tx())
+			return err
+		})
+		if err != nil {
+			return response.SmartError(err)
+		}
+
+		// Connect to the image registry (supports both LXD and SimpleStreams, public and private).
+		remoteServer, err = registry.ConnectImageRegistry(r.Context(), s, *imageRegistry)
+		if err != nil {
+			return response.SmartError(err)
+		}
+	}
 
 	// Set to true once we find that the request is currently handled on a member which isn't hosting the source instance.
 	sourceInstOnDifferentMember := false
@@ -1502,7 +1527,9 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 		}
 
 		if s.ServerClustered && !clusterNotification && targetMemberInfo == nil {
-			architectures, err := instance.SuitableArchitectures(ctx, s, tx, targetProjectName, sourceInst, sourceImageRef, req)
+			// Determine which cluster members are suitable for this instance based on its image architecture.
+			// We pass the pre-connected remoteServer (if any) to resolve architectures for registry-based images.
+			architectures, err := instance.SuitableArchitectures(ctx, s, tx, targetProjectName, sourceInst, sourceImageRef, req, remoteServer)
 			if err != nil {
 				return err
 			}
