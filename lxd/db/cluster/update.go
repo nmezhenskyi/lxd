@@ -6,6 +6,7 @@ package cluster
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -128,6 +129,168 @@ var updates = map[int]schema.Update{
 	82: updateFromV81,
 	83: updateFromV82,
 	84: updateFromV83,
+	85: updateFromV84,
+}
+
+func updateFromV84(ctx context.Context, tx *sql.Tx) error {
+	// Create the new images_source table that uses image_registry_id.
+	// The original images_source table hardcoded the server URL, protocol, and certificate directly.
+	// With the introduction of the image_registries feature, we now need to link an image source
+	// to a centralized image registry record instead. We do this by creating a new table with an
+	// image_registry_id foreign key, and then we migrate the data before swapping the tables.
+	_, err := tx.ExecContext(ctx, `
+CREATE TABLE images_source_new (
+	id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+	image_id INTEGER NOT NULL,
+	image_registry_id INTEGER NOT NULL,
+	alias TEXT NOT NULL,
+	FOREIGN KEY (image_id) REFERENCES "images" (id) ON DELETE CASCADE,
+	FOREIGN KEY (image_registry_id) REFERENCES "image_registries" (id) ON DELETE CASCADE
+);
+`)
+	if err != nil {
+		return err
+	}
+
+	// Fetch existing registries to match against.
+	// We want to avoid creating duplicate registries if an image source is pointing to one of our
+	// built-in registries (e.g., ubuntu, ubuntu-daily) or a registry that the user has already
+	// manually added. We'll use this list to find a match based on the server URL and protocol.
+	type registryInfo struct {
+		id       int
+		protocol int
+		url      string
+	}
+	registries := []registryInfo{}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT r.id, r.protocol, c.value
+		FROM image_registries r
+		JOIN image_registries_config c ON r.id = c.image_registry_id AND c.key = 'url'
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var r registryInfo
+		if err := rows.Scan(&r.id, &r.protocol, &r.url); err != nil {
+			return err
+		}
+		registries = append(registries, r)
+	}
+	rows.Close()
+
+	// Fetch existing image sources to migrate.
+	// We retrieve all the legacy image sources so that we can either map them to an existing
+	// registry or generate a new "legacy" registry for them if they point to an unknown server.
+	type imageSource struct {
+		id          int
+		imageID     int
+		server      string
+		protocol    int
+		certificate string
+		alias       string
+	}
+	sources := []imageSource{}
+
+	rows, err = tx.QueryContext(ctx, "SELECT id, image_id, server, protocol, certificate, alias FROM images_source")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var s imageSource
+		if err := rows.Scan(&s.id, &s.imageID, &s.server, &s.protocol, &s.certificate, &s.alias); err != nil {
+			return err
+		}
+		sources = append(sources, s)
+	}
+	rows.Close()
+
+	type registryKey struct {
+		server   string
+		protocol int
+		cert     string
+	}
+	migratedRegistries := make(map[registryKey]int)
+
+	for _, s := range sources {
+		var matchingRegistryID int
+
+		// Try to match an existing registry (like built-ins).
+		// We strip the trailing slash from the server URL to ensure we match cleanly against the
+		// registry configurations, as URLs might have been stored with or without a trailing slash.
+		serverURL := strings.TrimSuffix(s.server, "/")
+		for _, r := range registries {
+			if r.protocol == s.protocol && strings.TrimSuffix(r.url, "/") == serverURL {
+				matchingRegistryID = r.id
+				break
+			}
+		}
+
+		if matchingRegistryID == 0 {
+			key := registryKey{server: serverURL, protocol: s.protocol, cert: s.certificate}
+			if id, ok := migratedRegistries[key]; ok {
+				matchingRegistryID = id
+			} else {
+				// Create a new registry.
+				// No existing registry matches this image source's URL and protocol.
+				// We must automatically create a new, dedicated image registry for it so that the
+				// migrated image source has a valid registry to link to. We generate a unique name
+				// based on a hash of the connection details to avoid naming collisions if multiple
+				// identical legacy sources exist across different images.
+				h := sha256.New()
+				h.Write([]byte(fmt.Sprintf("%s|%d|%s", serverURL, s.protocol, s.certificate)))
+				hashStr := fmt.Sprintf("%x", h.Sum(nil))[:8]
+				name := fmt.Sprintf("auto-migrated-%s", hashStr)
+
+				res, err := tx.ExecContext(ctx, "INSERT INTO image_registries (name, description, protocol, builtin) VALUES (?, ?, ?, 0)", name, "Auto-migrated legacy image source", s.protocol)
+				if err != nil {
+					return err
+				}
+
+				id, err := res.LastInsertId()
+				if err != nil {
+					return err
+				}
+				matchingRegistryID = int(id)
+
+				_, err = tx.ExecContext(ctx, "INSERT INTO image_registries_config (image_registry_id, key, value) VALUES (?, 'url', ?)", matchingRegistryID, s.server)
+				if err != nil {
+					return err
+				}
+
+				if s.certificate != "" {
+					_, err = tx.ExecContext(ctx, "INSERT INTO image_registries_config (image_registry_id, key, value) VALUES (?, 'certificate', ?)", matchingRegistryID, s.certificate)
+					if err != nil {
+						return err
+					}
+				}
+
+				migratedRegistries[key] = matchingRegistryID
+			}
+		}
+
+		_, err = tx.ExecContext(ctx, "INSERT INTO images_source_new (id, image_id, image_registry_id, alias) VALUES (?, ?, ?, ?)", s.id, s.imageID, matchingRegistryID, s.alias)
+		if err != nil {
+			return err
+		}
+	}
+
+	_, err = tx.ExecContext(ctx, "DROP TABLE images_source")
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.ExecContext(ctx, "ALTER TABLE images_source_new RENAME TO images_source")
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func updateFromV83(ctx context.Context, tx *sql.Tx) error {

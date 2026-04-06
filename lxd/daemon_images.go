@@ -159,8 +159,7 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	if args.PreferCached && interval > 0 && alias != fp {
 		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 			for _, architecture := range s.OS.Architectures {
-				// TODO: Use image registry instead of Server and Protocol.
-				cachedFingerprint, err := tx.GetCachedImageSourceFingerprint(ctx, args.Server, args.Protocol, alias, args.Type, architecture)
+				cachedFingerprint, err := tx.GetCachedImageSourceFingerprint(ctx, args.ImageRegistry, alias, args.Type, architecture)
 				if err == nil && cachedFingerprint != fp {
 					fp = cachedFingerprint
 					break
@@ -255,12 +254,7 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 				// Restore the source aliases so the caller can handle them (e.g., if --copy-aliases is used).
 				imgInfo.Aliases = sourceAliases
 
-				// Register the source project/alias so the image can be auto-updated in the future.
-				if args.Protocol == "" {
-					args.Protocol = "lxd"
-				}
-
-				return tx.CreateImageSource(ctx, id, args.Server, args.Protocol, args.Certificate, alias)
+				return tx.CreateImageSource(ctx, id, args.ImageRegistry, alias)
 			})
 			if err != nil {
 				return nil, err
@@ -559,8 +553,7 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 				return err
 			}
 
-			// TODO: use image registry instead of server, protocol, certificate.
-			return tx.CreateImageSource(ctx, id, args.Server, imageRegistry.Protocol, args.Certificate, alias)
+			return tx.CreateImageSource(ctx, id, args.ImageRegistry, alias)
 		})
 		if err != nil {
 			return nil, err
