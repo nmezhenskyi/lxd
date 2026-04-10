@@ -8,6 +8,7 @@ How to work with existing images:
 ```{toctree}
 :titlesonly:
 
+Manage image registries </howto/image_registries>
 Use remote images </howto/images_remote>
 Manage images </howto/images_manage>
 Associate profiles </howto/images_profiles>

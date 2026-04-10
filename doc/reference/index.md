@@ -41,6 +41,7 @@ Configuration option index </config-options>
 /reference/projects
 /reference/storage_drivers
 /reference/networks
+/reference/image_registries
 /reference/placement_groups
 /reference/clusters
 ```
