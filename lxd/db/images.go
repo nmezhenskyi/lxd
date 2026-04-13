@@ -51,29 +51,24 @@ SELECT fingerprint
 }
 
 // CreateImageSource inserts a new image source.
-func (c *ClusterTx) CreateImageSource(ctx context.Context, id int, server string, protocol string, certificate string, alias string) error {
-	protocolInt := -1
-	for protoInt, protoString := range cluster.ImageSourceProtocol {
-		if protoString == protocol {
-			protocolInt = protoInt
+func (c *ClusterTx) CreateImageSource(ctx context.Context, id int, imageRegistry string, alias string) error {
+	q := `SELECT id FROM image_registries WHERE name=?`
+	var registryID int
+	err := c.tx.QueryRowContext(ctx, q, imageRegistry).Scan(&registryID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return api.StatusErrorf(http.StatusNotFound, "Image registry not found")
 		}
+		return err
 	}
 
-	if protocolInt == -1 {
-		return fmt.Errorf("Invalid protocol: %s", protocol)
-	}
-
-	_, err := query.UpsertObject(c.tx, "images_source", []string{
+	_, err = query.UpsertObject(c.tx, "images_source", []string{
 		"image_id",
-		"server",
-		"protocol",
-		"certificate",
+		"image_registry_id",
 		"alias",
 	}, []any{
 		id,
-		server,
-		protocolInt,
-		certificate,
+		registryID,
 		alias,
 	})
 
@@ -81,9 +76,9 @@ func (c *ClusterTx) CreateImageSource(ctx context.Context, id int, server string
 }
 
 // GetCachedImageSourceFingerprint tries to find a source entry of a locally
-// cached image that matches the given remote details (server, protocol and
+// cached image that matches the given remote details (image registry and
 // alias). Return the fingerprint linked to the matching entry, if any.
-func (c *ClusterTx) GetCachedImageSourceFingerprint(ctx context.Context, server string, protocol string, alias string, typeName string, architecture int) (string, error) {
+func (c *ClusterTx) GetCachedImageSourceFingerprint(ctx context.Context, imageRegistry string, alias string, typeName string, architecture int) (string, error) {
 	imageType := instancetype.Any
 	if typeName != "" {
 		var err error
@@ -93,25 +88,16 @@ func (c *ClusterTx) GetCachedImageSourceFingerprint(ctx context.Context, server 
 		}
 	}
 
-	protocolInt := -1
-	for protoInt, protoString := range cluster.ImageSourceProtocol {
-		if protoString == protocol {
-			protocolInt = protoInt
-		}
-	}
-
-	if protocolInt == -1 {
-		return "", fmt.Errorf("Invalid protocol: %s", protocol)
-	}
-
 	q := `SELECT images.fingerprint
 			FROM images_source
 			INNER JOIN images
 			ON images_source.image_id=images.id
-			WHERE server=? AND protocol=? AND alias=? AND auto_update=1 AND images.architecture=?
+			INNER JOIN image_registries
+			ON images_source.image_registry_id=image_registries.id
+			WHERE image_registries.name=? AND alias=? AND auto_update=1 AND images.architecture=?
 `
 
-	args := []any{server, protocolInt, alias, architecture}
+	args := []any{imageRegistry, alias, architecture}
 	if imageType != instancetype.Any {
 		q += "AND images.type=?\n"
 		args = append(args, imageType)
@@ -433,8 +419,8 @@ func (c *ClusterTx) GetImageAlias(ctx context.Context, projectName string, image
 			 FROM images_aliases
 			 INNER JOIN images
 			 ON images_aliases.image_id=images.id
-                         INNER JOIN projects
-                         ON images_aliases.project_id=projects.id
+				 INNER JOIN projects
+				 ON images_aliases.project_id=projects.id
 			 WHERE projects.name=? AND images_aliases.name=?`
 	if !isTrustedClient {
 		q = q + ` AND images.public=1`
@@ -457,6 +443,43 @@ func (c *ClusterTx) GetImageAlias(ctx context.Context, projectName string, image
 	err = c.tx.QueryRowContext(ctx, q, arg1...).Scan(arg2...)
 	if err != nil {
 		if err == sql.ErrNoRows {
+			return -1, api.ImageAliasesEntry{}, api.StatusErrorf(http.StatusNotFound, "Image alias not found")
+		}
+
+		return 0, entry, err
+	}
+
+	entry.Name = imageName
+	entry.Target = fingerprint
+	entry.Description = description
+	entry.Type = instancetype.Type(imageType).String()
+
+	return id, entry, nil
+}
+
+// GetImageAliasFromAnyProject returns the alias with the given name from any project.
+func (c *ClusterTx) GetImageAliasFromAnyProject(ctx context.Context, imageName string, isTrustedClient bool) (int, api.ImageAliasesEntry, error) {
+	id := -1
+	entry := api.ImageAliasesEntry{}
+	q := `SELECT images_aliases.id, images.fingerprint, images.type, images_aliases.description
+			 FROM images_aliases
+			 INNER JOIN images
+			 ON images_aliases.image_id=images.id
+				 INNER JOIN projects
+				 ON images_aliases.project_id=projects.id
+			 WHERE images_aliases.name=?`
+	if !isTrustedClient {
+		q = q + ` AND images.public=1`
+	}
+
+	var fingerprint, description string
+	var imageType int
+
+	arg1 := []any{imageName}
+	arg2 := []any{&id, &fingerprint, &imageType, &description}
+	err := c.tx.QueryRowContext(ctx, q, arg1...).Scan(arg2...)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
 			return -1, api.ImageAliasesEntry{}, api.StatusErrorf(http.StatusNotFound, "Image alias not found")
 		}
 
