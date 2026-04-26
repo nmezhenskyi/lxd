@@ -269,9 +269,13 @@ func (c *cmdInit) create(conf *config.Config, args []string, launch bool) (lxd.I
 	}
 
 	// Decide whether we are creating a container or a virtual machine.
-	instanceDBType := api.InstanceTypeContainer
+	var instanceDBType api.InstanceType
 	if c.flagVM {
 		instanceDBType = api.InstanceTypeVM
+	} else if !d.HasExtension("image_registries") {
+		// If the server doesn't support the image_registries extension, we must provide a default
+		// type as the server won't be able to infer it from the image source itself.
+		instanceDBType = api.InstanceTypeContainer
 	}
 
 	// Set the target if provided.
