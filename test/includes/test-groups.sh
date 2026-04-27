@@ -179,6 +179,7 @@ readonly test_group_standalone=(
     "operations_conflict_reference"
     "instances_selective_recursion"
     "image_registries_basic"
+    "image_registries_list_images_compression"
     "image_backup_confined"
     "image_metadata_confined"
     "image_metadata_template_target_confined"
