@@ -178,6 +178,7 @@ readonly test_group_standalone=(
     "operation_wait_failure"
     "operations_conflict_reference"
     "instances_selective_recursion"
+    "image_registries_basic"
     "image_backup_confined"
     "image_metadata_confined"
     "image_metadata_template_target_confined"
