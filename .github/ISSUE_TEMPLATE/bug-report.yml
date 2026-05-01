@@ -39,7 +39,7 @@ body:
   - type: textarea
     id: snap_list
     attributes:
-      label: Output of `snap list --all lxd core20 core22 core24 snapd`
+      label: Output of `snap list --all lxd core20 core22 core24 core26 snapd`
       render: shell
     validations:
       required: true
